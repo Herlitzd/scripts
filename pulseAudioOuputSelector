@@ -1,0 +1,190 @@
+#!/usr/bin/python3
+import gi
+gi.require_version('Gtk', '3.0')
+gi.require_version('Notify', '0.7')
+import subprocess
+import signal
+from gi.repository import GLib
+from gi.repository import Gtk, Gdk
+from gi.repository import GdkPixbuf
+from gi.repository import Notify
+import re
+
+iconPath = '/usr/share/icons/Apricity Icons/devices/symbolic/audio-headphones-symbolic.svg'
+
+
+class SinkLine:
+    def __init__(self, txt: str):
+        self.index = ''
+        self.name = ''
+        self.isSelected = False
+        if(not txt.strip() == ''):
+            onSpc = txt.strip().split(' ')
+            self.index = int(onSpc[0].split(':')[1])
+            onName = onSpc[1].split(':')
+            self.name = onName[1].replace('"', '')
+            self.isSelected = onSpc[0][0] == '*'
+
+
+class VolumeState:
+    def __init__(self, txt: str):
+        self.left = 0
+        self.right = 0
+        self.isSelected = False
+
+        if(not txt.strip() == ''):
+            lines = txt.splitlines()  # type: List[str]
+            self.index = int(lines[0].split(':', 1)[1])
+            self.left = int(lines[1].split(':', 1)[1].split('/')[1][:-1])/100
+            self.right = int(lines[2].split(':', 1)[1].split('/')[1][:-1])/100
+            self.isSelected = lines[0][0] == '*'
+
+
+def execCmd(cmd):
+    return bytes.decode(subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE).stdout.read(), 'utf-8')
+
+
+def create(str):
+    return SinkLine(str)
+
+
+class MyStatusIconApp:
+    def __init__(self):
+        self.maxVolume = 65536
+        self.notification = None
+        self.status_icon = Gtk.StatusIcon()
+        pix = GdkPixbuf.Pixbuf.new_from_file_at_size(iconPath, 32, 32)
+        self.status_icon.set_from_pixbuf(pix)
+        self.status_icon.connect(
+            "popup-menu", self.right_click_event)  # popup-menu
+        self.status_icon.connect(
+            "activate", self.left_click_event)  # popup-menu
+
+        # pacmd list-sinks | grep -e 'device.description' -e 'index' | tr -d " \t" | sed -n '/\*/{N;p}' | column -x | sed \"s/\t\+/ /g\"
+        txt = self.getCurrentSink()
+        self.status_icon.set_tooltip_text(txt.name)
+        self.registeredNotify = False
+        self.volumeWindow = Gtk.Window()
+        self.volumeWindow.set_decorated(False)
+        self.volumeWindow.set_default_size(28, 120)
+        ad1 = Gtk.Adjustment(0, 0, 105, 5, 10, 5)
+        self.scale = Gtk.Scale(
+            orientation=Gtk.Orientation.VERTICAL, adjustment=ad1)
+        self.scale.set_margin_left(0)
+        self.scale.set_inverted(True)
+        self.scale.set_draw_value(False)
+        self.volumeWindow.set_skip_taskbar_hint(True)
+        self.volumeWindow.set_vexpand(True)
+        self.volumeWindow.add(self.scale)
+        self.volumeWindow.connect('focus-out-event', self.lostFocus)
+        self.scale.connect("value-changed", self.volumeValueChanged)
+
+    def getCurrentSink(self):
+        return SinkLine(execCmd("pacmd list-sinks | grep -e 'device.description' -e 'index' | tr -d \" \t\" | sed -n '/\*/{N;p}' | sed -r \"s/device.description=+/name:/g\" | column -x | sed \"s/\t\+/ /g\""))
+
+    def lostFocus(self, x, t):
+        self.volumeWindow.hide()
+
+    def notify(self, title, body):
+        if(self.registeredNotify == False):
+            Notify.init('PulseAudioOutputSelector')
+            self.registeredNotify = True
+        if(self.notification == None):
+            self.notification = Notify.Notification.new(title, body, iconPath)
+        else:
+            self.notification.update(title, body, iconPath)
+        self.notification.show()
+
+    def getVolumes(self):
+        volumeText = execCmd(
+            "pacmd list-sinks | grep -v 'base' | grep -e 'index' -e 'volume:' | sed 's/,/\\n/; s/volume://' | tr -d ' \\t' | sed '0~3 s/$/\\n/g'")
+        volumeLevels = list(filter(None, volumeText.split('\n\n')))
+
+        states = [VolumeState(t) for t in volumeLevels]
+
+        return states
+
+    def left_click_event(self, icon):
+        if(not self.volumeWindow.is_visible()):
+
+            # pacmd list-sinks | grep -e '       volume:' | cut -f2- -d: | sed 's/,/\n/' | tr -d ' '
+            # pacmd list-sinks | grep -e 'index' -e '    volume:' | sed 's/,/\n/; s/volume://' | tr -d ' \t' | sed '0~3 s/$/\n/g'
+            volumes = self.getVolumes()
+            default = list(filter(lambda vol: vol.isSelected, volumes))[
+                0]  # type: VolumeState
+
+            self.scale.handler_block_by_func(self.volumeValueChanged)
+            self.scale.set_value(default.left*100)
+            self.scale.handler_unblock_by_func(self.volumeValueChanged)
+            self.volumeWindow.move(
+                icon.get_geometry().area.x, icon.get_geometry().area.y)
+            self.volumeWindow.show_all()
+        else:
+            self.volumeWindow.hide()
+
+    def volumeValueChanged(self, value):
+        self.scale.handler_block_by_func(self.volumeValueChanged)
+        current = self.getCurrentSink()
+        val = round((self.scale.get_value()/100) * self.maxVolume)
+        # This doesn't need a pipe
+        execCmd("pacmd set-sink-volume " +
+                str(current.index) + ' '+str(val))
+
+        self.scale.handler_unblock_by_func(self.volumeValueChanged)
+        return
+
+    def right_click_event(self, icon, button, time):
+        self.menu = Gtk.Menu()
+        names = execCmd(
+            "pacmd list-sinks | grep -e 'device.description' -e 'index' | tr -d \"\t \" | sed -r \"s/device.description=+/name:/g\" | column -x | sed \"s/\t\+/ /g\"")
+        lines = map(create, names.splitlines())
+        for x in lines:
+            item = None
+            if(x.isSelected):
+                item = Gtk.ImageMenuItem(Gtk.STOCK_YES)
+                item.set_always_show_image(True)
+                item.set_use_stock(True)
+            else:
+                item = Gtk.MenuItem()
+            item.set_label(x.name)
+            item.connect("activate", lambda widget,
+                         device=x: self.deviceSelected(device))
+            self.menu.append(item)
+
+        self.menu.show_all()
+        self.menu.popup(None, None, None, self.status_icon, button, time)
+
+    def deviceSelected(self, device: SinkLine):
+        r = re.compile('/\W \-/g')
+        formatted = 'Playback' + \
+            r.sub('', device.name).replace('-', '') + 'PulseAudioMixer'
+        execCmd("pacmd set-default-sink " + str(device.index))
+
+        sourceIndexLines = execCmd(
+            "pacmd list-sink-inputs | grep -oP '(?<=index:).*' | tr -d \" \t\"").splitlines()
+        for source in sourceIndexLines:
+            cmd = "pacmd move-sink-input " + source + " " + str(device.index)
+            execCmd(cmd)
+
+        # xfce4-mixer was killed in 2017
+        # subprocess.Popen("xfconf-query -c  xfce4-mixer -p /active-card -s "+formatted,
+        #                  shell=True, stdout=subprocess.PIPE)
+        self.status_icon.set_tooltip_text(device.name)
+        self.notify('Audio Device Change', 'now '+device.name)
+
+
+app = MyStatusIconApp()
+# Exit on ctrl+c
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+Gtk.main()
+
+# pacmd list-sinks | grep -e 'device.description' -e 'index' | tr -d "\t " | sed -r "s/device.description=+/name:/g" | column -x
+# pacmd list-sinks | grep -e 'device.description' -e 'index' | tr -d "\t " | sed -r "s/device.description=+/name:/g" | column -x | sed "s/   \+/ /g"
+
+# old
+# pacmd list-sinks | grep -e 'device.description' -e 'index' | sed -e '/\*/ {$!N; d;}' | tr -d "\t " | sed -r "s/device.description=+/name:/g"
+
+# pacmd list-sink-inputs
+
+# Audio Sinks
+# pacmd list-sink-inputs | grep -e "index:" -e "application.name =" -e "sink:" | tr -d " \t" | sed "s/\=/:/g"

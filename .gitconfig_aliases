@@ -1,0 +1,4 @@
+[alias]
+    squash = "!f(){ git reset --soft HEAD~${1} && git commit --edit -m\"$(git log --format=%B --reverse HEAD..HEAD@{1})\"; };f"
+    curr = "rev-parse --abbrev-ref HEAD"
+    desc = "branch --edit-description"

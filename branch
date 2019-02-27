@@ -1,0 +1,18 @@
+#! /bin/bash
+
+branches=$(git branch 2> /dev/null | tr "*" " ")
+branchesWithDesc=()
+while read -r b;
+  do
+    desc="$(git config branch.$b.description 2> /dev/null)"
+    branchesWithDesc+="\e[96m$b \e[92m$desc\e[0m\n"
+done <<< "$branches"
+
+if [ -z "$1" ];
+  then
+    echo -e "$branchesWithDesc"
+  else
+    echo "$(echo -e $branchesWithDesc | grep -i $1 )"
+fi
+
+# { read first rest ; echo $first ; })
